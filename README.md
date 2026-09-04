@@ -249,6 +249,44 @@ Validated at startup, so an invalid value fails the boot rather than the first r
 
 ---
 
+## Frontend
+
+A thin Next.js client lives in `frontend/`. It is optional — the backend is complete
+and independently testable without it — but it demonstrates the full flow in a browser.
+
+```bash
+cd frontend
+npm install
+npm run dev          # http://localhost:3000
+```
+
+Run the backend first; the frontend is a client, not a replacement for it.
+
+| Route | Purpose |
+|---|---|
+| `/` | Catalogue, add to cart |
+| `/cart` | Quantities, removal, optional coupon, checkout |
+| `/orders/[orderId]` | Order confirmation with gross / discount / net |
+| `/admin` | Generate a reward coupon, view the report |
+
+**The browser never calls the backend directly.** `next.config.ts` rewrites `/api/*`
+to `http://localhost:8080/api/*`, so the app is same-origin and **the backend needs no
+CORS configuration**. Override the target with `BACKEND_URL` if the backend runs
+elsewhere.
+
+Two details worth knowing:
+
+- **Checkout sends an `Idempotency-Key`.** One key is generated per checkout attempt
+  and reused for retries, so a request that timed out but succeeded replays the
+  original order instead of creating a second one. Editing the coupon starts a new
+  attempt and issues a new key.
+- **A generated coupon code is shown once.** There is no endpoint to list coupons, so
+  the admin page displays a new code prominently and keeps the most recent one in
+  `localStorage`.
+
+There is no authentication, so the cart id in `localStorage` is the only notion of
+identity.
+
 ## Out of scope
 
 Deliberately not implemented, and not stubbed to look implemented:
@@ -256,9 +294,7 @@ Deliberately not implemented, and not stubbed to look implemented:
 - **Authentication and authorisation** — admin endpoints are unprotected.
 - **Real payment** — a successful checkout is treated as payment success. There is no
   payment gateway, fake or otherwise.
-- **Frontend** — this repository is backend only. There is no `frontend/` directory and
-  no UI build step. Use the Postman collection or `curl`.
-- **OpenAPI/Swagger** — see above.
+- **OpenAPI/Swagger** — see above. The Postman collection is the API documentation.
 
 Everything else deferred, and why, is in
 [DECISIONS.md §16–§17](DECISIONS.md).
@@ -278,4 +314,8 @@ backend/
     application.yml                 config; credentials come from the environment
     db/migration/                   7 Flyway migrations
   src/test/java/com/uniblox/store/  9 test classes
+frontend/
+  next.config.ts                    /api/* proxy to the backend
+  src/lib/                          typed API client, money formatter, storage
+  src/app/                          products, cart, order, admin routes
 ```
