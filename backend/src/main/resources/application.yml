@@ -1,0 +1,48 @@
+spring:
+  application:
+    name: store
+
+  # Load local credentials from a git-ignored `.env` in the working directory.
+  # Optional: real environment variables take precedence, which is how this runs
+  # anywhere other than a developer machine.
+  config:
+    import: optional:file:.env[.properties]
+
+  # Connection details come from `.env` or the environment (see .env.example).
+  # Nothing is defaulted, so a misconfigured deployment fails at startup rather
+  # than silently pointing at the wrong database.
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    hikari:
+      pool-name: store-pool
+      # Supabase poolers cap connections; keep the pool small and explicit.
+      maximum-pool-size: 5
+      connection-timeout: 10000
+
+  jpa:
+    # Flyway owns the schema. Hibernate only checks that the mapping matches it.
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+# The reward rule: every `order-interval` successful orders earns one coupon worth
+# `discount-percent` off. Validated at startup.
+store:
+  rewards:
+    order-interval: 5
+    discount-percent: 10
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: always

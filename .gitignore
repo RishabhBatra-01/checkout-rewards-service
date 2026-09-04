@@ -1,0 +1,34 @@
+# ---- IDE ----
+.idea/
+*.iml
+.vscode/
+*.swp
+.DS_Store
+
+# ---- Java / Spring ----
+target/
+build/
+!.mvn/wrapper/maven-wrapper.jar
+.mvn/wrapper/maven-wrapper.properties.bak
+*.log
+hs_err_pid*
+
+# ---- Node / Next.js ----
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+
+# ---- Secrets & local config ----
+# Never commit credentials. Committed config must be runnable by an evaluator
+# with no private services. See README.md -> "Configure the database".
+.env
+.env.*
+!.env.example
+application-local.yml
+application-local.properties
+application-secrets.*
+*.pem
