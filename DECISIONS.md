@@ -20,8 +20,8 @@ Application checks also exist to produce useful error messages.
 |---|---|---|
 | 1 | Inventory never goes negative | `check (inventory >= 0)` + conditional `UPDATE ... WHERE inventory >= :qty` |
 | 2 | A cart holds at most one row per product | `unique (cart_id, product_id)` on `cart_items` |
-| 3 | Quantities are always positive | `check (quantity > 0)`, plus `@Positive` on requests |
-| 4 | A cart produces at most one order | `unique` on `orders.cart_id` + cart row lock + `status` check |
+| 3 | Cart quantities are positive and bounded | `check (quantity > 0)`, `@Positive` + `@Max(1000)` on requests, and an accumulation check so repeated adds cannot overflow |
+| 4 | A cart produces at most one order, and is immutable afterwards | `unique` on `orders.cart_id` + cart row lock + `status` check on checkout and on every cart mutation |
 | 5 | One idempotency key produces at most one order | `unique` on `orders.idempotency_key` |
 | 6 | An idempotency key is never blank | `check (length(btrim(idempotency_key)) between 1 and 200)` |
 | 7 | Order totals reconcile | `check (net_total_cents = gross_total_cents - discount_total_cents)` |
@@ -291,11 +291,11 @@ several genuinely different conditions share a status:
 |---|---|---|
 | `400` | The request itself is malformed | `VALIDATION_FAILED`, `IDEMPOTENCY_KEY_REQUIRED` |
 | `404` | The thing addressed does not exist | `CART_NOT_FOUND`, `CART_ITEM_NOT_FOUND`, `PRODUCT_NOT_FOUND`, `ORDER_NOT_FOUND`, `COUPON_NOT_FOUND` |
-| `409` | The request is well-formed but conflicts with current state | `CART_NOT_OPEN`, `CART_EMPTY`, `INSUFFICIENT_INVENTORY`, `COUPON_ALREADY_REDEEMED`, `IDEMPOTENCY_KEY_REUSED`, `MILESTONE_NOT_REACHED`, `MILESTONE_ALREADY_REWARDED` |
+| `409` | The request is well-formed but conflicts with current state | `CART_NOT_OPEN`, `CART_EMPTY`, `CART_ITEM_QUANTITY_LIMIT`, `INSUFFICIENT_INVENTORY`, `COUPON_ALREADY_REDEEMED`, `IDEMPOTENCY_KEY_REUSED`, `MILESTONE_NOT_REACHED`, `MILESTONE_ALREADY_REWARDED` |
 
 **Choice:** branch on `code`, not on status. Inventing distinct status codes to
-separate seven different conflicts would abuse HTTP semantics; a stable string is what
-a client should switch on. 14 codes are defined.
+separate eight different conflicts would abuse HTTP semantics; a stable string is what
+a client should switch on. 15 codes are defined.
 
 **Detail messages name the specific thing** — which product, how much stock, which
 milestone, how many orders — so a failure is actionable without reading server logs.
@@ -368,8 +368,8 @@ way that matters.
 - Idempotent checkout with replay semantics
 - Coupon generation at milestones; coupon redemption with a percentage discount
 - Admin report reconciling with orders and coupons
-- RFC 7807 problem responses with 14 stable machine-readable `code` values
-- 7 Flyway migrations; 63 test executions including five concurrency tests
+- RFC 7807 problem responses with 15 stable machine-readable `code` values
+- 7 Flyway migrations; 69 test executions including five concurrency tests
 
 **Deliberately deferred**
 

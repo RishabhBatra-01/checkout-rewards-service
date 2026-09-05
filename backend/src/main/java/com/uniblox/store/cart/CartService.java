@@ -40,14 +40,22 @@ public class CartService {
      */
     @Transactional
     public CartResponse addItem(UUID cartId, AddCartItemRequest request) {
-        Cart cart = carts.findByIdForUpdate(cartId)
-                .orElseThrow(() -> new CartNotFoundException(cartId));
+        Cart cart = openCartForUpdate(cartId);
         Product product = products.findById(request.productId())
                 .orElseThrow(() -> new ProductNotFoundException(request.productId()));
 
         cartItems.findByCartIdAndProductId(cartId, product.getId())
                 .ifPresentOrElse(
-                        existing -> existing.increaseQuantityBy(request.quantity()),
+                        existing -> {
+                            // Checked before adding: an unbounded int += int would wrap
+                            // negative and surface as an opaque constraint violation.
+                            long combined = (long) existing.getQuantity() + request.quantity();
+                            if (combined > CartItem.MAX_QUANTITY) {
+                                throw new CartItemQuantityLimitException(
+                                        product.getId(), combined, CartItem.MAX_QUANTITY);
+                            }
+                            existing.increaseQuantityBy(request.quantity());
+                        },
                         () -> cartItems.save(CartItem.of(cartId, product, request.quantity())));
 
         return toResponse(cart);
@@ -62,8 +70,7 @@ public class CartService {
     @Transactional
     public CartResponse updateItemQuantity(
             UUID cartId, Long productId, UpdateCartItemRequest request) {
-        Cart cart = carts.findByIdForUpdate(cartId)
-                .orElseThrow(() -> new CartNotFoundException(cartId));
+        Cart cart = openCartForUpdate(cartId);
         CartItem item = cartItems.findByCartIdAndProductId(cartId, productId)
                 .orElseThrow(() -> new CartItemNotFoundException(cartId, productId));
 
@@ -75,14 +82,28 @@ public class CartService {
     /** Removes a product from the cart. Inventory is untouched; nothing was ever held. */
     @Transactional
     public CartResponse removeItem(UUID cartId, Long productId) {
-        Cart cart = carts.findByIdForUpdate(cartId)
-                .orElseThrow(() -> new CartNotFoundException(cartId));
+        Cart cart = openCartForUpdate(cartId);
         CartItem item = cartItems.findByCartIdAndProductId(cartId, productId)
                 .orElseThrow(() -> new CartItemNotFoundException(cartId, productId));
 
         cartItems.delete(item);
 
         return toResponse(cart);
+    }
+
+    /**
+     * Loads a cart for modification, refusing one that is no longer open.
+     *
+     * <p>Checkout is terminal: once a cart has produced an order, its contents are the
+     * historical record of what was ordered and must not drift away from it.
+     */
+    private Cart openCartForUpdate(UUID cartId) {
+        Cart cart = carts.findByIdForUpdate(cartId)
+                .orElseThrow(() -> new CartNotFoundException(cartId));
+        if (cart.getStatus() != CartStatus.OPEN) {
+            throw new CartNotOpenException(cartId, cart.getStatus());
+        }
+        return cart;
     }
 
     private CartResponse toResponse(Cart cart) {

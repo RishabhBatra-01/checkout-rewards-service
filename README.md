@@ -125,7 +125,7 @@ curl -s localhost:8080/api/products      # the seeded catalogue
 ./mvnw test
 ```
 
-**63 tests.** Every test runs against a real PostgreSQL 17 container started by
+**69 tests.** Every test runs against a real PostgreSQL 17 container started by
 Testcontainers — never an in-memory database, because H2 cannot reproduce the row
 locking and isolation behaviour the concurrency tests depend on.
 

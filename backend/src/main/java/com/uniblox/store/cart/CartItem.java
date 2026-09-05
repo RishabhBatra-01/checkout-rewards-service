@@ -23,6 +23,12 @@ import java.util.UUID;
 @Table(name = "cart_items")
 public class CartItem {
 
+    /**
+     * Upper bound for a single cart line. Its real job is to keep quantity arithmetic
+     * far away from integer overflow; no legitimate order approaches it.
+     */
+    public static final int MAX_QUANTITY = 1000;
+
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;

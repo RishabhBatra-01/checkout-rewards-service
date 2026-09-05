@@ -1,6 +1,7 @@
 package com.uniblox.store.web;
 
 import com.uniblox.store.cart.CartItemNotFoundException;
+import com.uniblox.store.cart.CartItemQuantityLimitException;
 import com.uniblox.store.cart.CartNotFoundException;
 import com.uniblox.store.cart.CartNotOpenException;
 import com.uniblox.store.cart.EmptyCartException;
@@ -49,6 +50,15 @@ class ApiExceptionHandler {
     @ExceptionHandler(OrderNotFoundException.class)
     ProblemDetail handleOrderNotFound(OrderNotFoundException exception) {
         return problem(HttpStatus.NOT_FOUND, "Order not found", "ORDER_NOT_FOUND", exception);
+    }
+
+    @ExceptionHandler(CartItemQuantityLimitException.class)
+    ProblemDetail handleCartItemQuantityLimit(CartItemQuantityLimitException exception) {
+        return problem(
+                HttpStatus.CONFLICT,
+                "Cart item quantity limit exceeded",
+                "CART_ITEM_QUANTITY_LIMIT",
+                exception);
     }
 
     @ExceptionHandler(CartNotOpenException.class)

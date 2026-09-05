@@ -234,6 +234,98 @@ class CartItemApiIntegrationTest {
         return JsonPath.read(products(), "$[1].id");
     }
 
+    // ---------- a checked-out cart is immutable ----------
+
+    @Test
+    void addingToACheckedOutCartIsRejected() throws Exception {
+        String cartId = checkedOutCart();
+
+        mockMvc.perform(addItem(cartId, "{\"productId\":%d,\"quantity\":1}".formatted(secondProductId())))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.title").value("Cart is not open"))
+                .andExpect(jsonPath("$.code").value("CART_NOT_OPEN"));
+
+        assertCartUnchangedAfterCheckout(cartId);
+    }
+
+    @Test
+    void updatingAnItemInACheckedOutCartIsRejected() throws Exception {
+        String cartId = checkedOutCart();
+
+        mockMvc.perform(updateItem(cartId, firstProductId(), "{\"quantity\":9}"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("CART_NOT_OPEN"));
+
+        assertCartUnchangedAfterCheckout(cartId);
+    }
+
+    @Test
+    void removingAnItemFromACheckedOutCartIsRejected() throws Exception {
+        String cartId = checkedOutCart();
+
+        mockMvc.perform(removeItem(cartId, firstProductId()))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("CART_NOT_OPEN"));
+
+        assertCartUnchangedAfterCheckout(cartId);
+    }
+
+    // ---------- quantity is bounded, so it cannot overflow ----------
+
+    @ParameterizedTest
+    @ValueSource(ints = {1001, Integer.MAX_VALUE})
+    void rejectsASingleRequestAboveTheQuantityLimit(int quantity) throws Exception {
+        String cartId = createCart();
+
+        mockMvc.perform(addItem(cartId,
+                        "{\"productId\":%d,\"quantity\":%d}".formatted(firstProductId(), quantity)))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.title").value("Invalid request"))
+                .andExpect(jsonPath("$.code").value("VALIDATION_FAILED"));
+
+        mockMvc.perform(get("/api/carts/{cartId}", cartId))
+                .andExpect(jsonPath("$.items.length()").value(0));
+    }
+
+    @Test
+    void rejectsRepeatedAddsThatWouldExceedTheQuantityLimit() throws Exception {
+        String cartId = createCart();
+        int productId = firstProductId();
+        // Two individually valid requests whose sum is not. Before the limit existed the
+        // accumulated int could wrap negative and fail as an unhandled 500.
+        mockMvc.perform(addItem(cartId, "{\"productId\":%d,\"quantity\":1000}".formatted(productId)))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(addItem(cartId, "{\"productId\":%d,\"quantity\":1}".formatted(productId)))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.title").value("Cart item quantity limit exceeded"))
+                .andExpect(jsonPath("$.code").value("CART_ITEM_QUANTITY_LIMIT"));
+
+        // The rejected request left the stored quantity alone.
+        mockMvc.perform(get("/api/carts/{cartId}", cartId))
+                .andExpect(jsonPath("$.items[0].quantity").value(1000));
+    }
+
+    /** A cart that has been through checkout, so its status is CHECKED_OUT. */
+    private String checkedOutCart() throws Exception {
+        String cartId = createCart();
+        mockMvc.perform(addItem(cartId, "{\"productId\":%d,\"quantity\":2}".formatted(firstProductId())))
+                .andExpect(status().isOk());
+        mockMvc.perform(post("/api/carts/{cartId}/checkout", cartId)
+                        .header("Idempotency-Key", "cart-immutability-" + UUID.randomUUID()))
+                .andExpect(status().isCreated());
+        return cartId;
+    }
+
+    private void assertCartUnchangedAfterCheckout(String cartId) throws Exception {
+        mockMvc.perform(get("/api/carts/{cartId}", cartId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("CHECKED_OUT"))
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].productId").value(firstProductId()))
+                .andExpect(jsonPath("$.items[0].quantity").value(2));
+    }
+
     private org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder addItem(
             String cartId, String body) {
         return post("/api/carts/{cartId}/items", cartId)

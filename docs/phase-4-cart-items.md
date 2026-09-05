@@ -168,8 +168,9 @@ loading traps and cascade semantics that nothing needs yet. The service queries
 items explicitly instead.
 
 **Adding to a `CHECKED_OUT` cart is not rejected yet.** Nothing can produce that
-state until checkout exists, so the guard would be untestable. It lands with
-checkout, in the same conditional update that enforces single checkout.
+state until checkout exists, so the guard would be untestable here. It was added once
+checkout existed: `CartService` now loads a cart for modification through a single
+guard that rejects any status other than `OPEN` with `409 CART_NOT_OPEN`.
 
 ## Verified
 

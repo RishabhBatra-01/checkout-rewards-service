@@ -157,7 +157,9 @@ untouched — asserted explicitly in the tests, not assumed.
   intentional — availability is a checkout concern — but it means the first real
   availability error a customer sees will be at checkout.
 - Adding to, updating, or removing from a `CHECKED_OUT` cart is still not rejected,
-  because nothing can produce that state yet. It lands with checkout.
+  because nothing can produce that state yet. This was implemented once checkout
+  existed: all three mutations now load the cart through one guard that rejects a cart
+  which is not `OPEN` with `409 CART_NOT_OPEN`.
 
 ## Next phase
 
