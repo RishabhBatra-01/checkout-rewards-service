@@ -6,7 +6,15 @@ container via Testcontainers.
 
 **Approximate time spent:** Approximately 5 hours — 2 hours on September 4 (6:30 PM–8:30 PM) and 3 hours from September 4 (10:30 PM) to September 5 (1:30 AM).
 
-Detailed per-phase write-ups live in [`docs/`](docs/); this document is the summary.
+**A note on the commit history:** the work was built in phases, but the repository was
+initialised near the end, so the history is a small number of meaningful commits rather
+than a blow-by-blow record of how it developed. Nothing has been squashed or rewritten
+to look tidier than it was.
+
+The phase-by-phase account is in [`docs/`](docs/) instead — ten write-ups covering what
+was built at each stage, the alternatives that were rejected, and the defects found
+along the way, including several caught in review and fixed rather than papered over.
+This document is the summary.
 
 ---
 
