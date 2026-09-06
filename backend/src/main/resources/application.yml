@@ -1,3 +1,10 @@
+server:
+  # Tomcat's 8KB default counts every request header together. Browsers send cookies
+  # per *domain*, not per port, so anything else a developer has run on localhost
+  # tags along and can push a request over the limit -- rejected before Spring sees
+  # it, which looks like a broken app rather than a fat header.
+  max-http-request-header-size: 32KB
+
 spring:
   application:
     name: store

@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Store \u2014 Checkout & Rewards API",
-    "description": "Uniblox assessment backend.\n\nStart the app first:\n    cd backend && ./mvnw spring-boot:run\n\n`Create cart` saves the new id into the `cartId` collection variable, so every\ncart request after it works without copy-pasting a UUID. `productId` defaults to 1.\n\nThese requests are an executable reference rather than a single sequential run.\nRelated requests do chain -- `Add item to cart` followed by `Add same product\nagain` shows that a repeat add increments the quantity instead of duplicating a\nrow -- but a cart is spent once it has been checked out, so scenarios after\ncheckout need a fresh cart. Run those individually, creating a new cart first,\nand set `couponCode` and `emptyCartId` for the requests that name them.\n\nImplemented through Phase 6B: products (read-only), cart create/retrieve,\nadd / update / remove cart items, idempotent checkout, order retrieval, and\nadministrative reward-coupon generation, coupon redemption at checkout, and the administrative report.\n\nCheckout requires an `Idempotency-Key` header. Repeating a checkout with the same\nkey returns the original order as 200 with `Idempotent-Replay: true`, rather than\ncreating a second one.\n\nErrors carry a stable `code` alongside the RFC 7807 fields, so several distinct\n409 conditions (CART_NOT_OPEN, CART_EMPTY, INSUFFICIENT_INVENTORY) stay tellable apart.",
+    "description": "Uniblox assessment backend.\n\nStart the app first:\n    cd backend && ./mvnw spring-boot:run\n\n**Run Collection works end to end.** Every scenario creates the cart it needs, so no\nrequest depends on another having left the right state behind. Ids and idempotency\nkeys are captured into collection variables automatically -- nothing to copy by hand.\n\nThe only conditional step is the reward coupon: if the next milestone has not been\nearned yet, `Admin: generate reward coupon` answers 409 and the three coupon requests\nare skipped automatically. Place a few more orders and run again to see them.\n\nConcurrency is the one behaviour this collection cannot show, because Postman sends\nrequests one at a time. Use the backend test instead:\n    ./mvnw test -Dtest=CheckoutConcurrencyTest\n\nErrors carry a stable `code` alongside the RFC 7807 fields, so several distinct 409\nconditions stay tellable apart. Branch on `code`, not on the status.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -11,22 +11,22 @@
       "type": "string"
     },
     {
-      "key": "cartId",
-      "value": "",
-      "type": "string"
-    },
-    {
       "key": "productId",
       "value": "1",
       "type": "string"
     },
     {
-      "key": "orderId",
+      "key": "secondProductId",
+      "value": "2",
+      "type": "string"
+    },
+    {
+      "key": "cartId",
       "value": "",
       "type": "string"
     },
     {
-      "key": "emptyCartId",
+      "key": "orderId",
       "value": "",
       "type": "string"
     },
@@ -37,6 +37,36 @@
     },
     {
       "key": "couponCode",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "limitCartId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "inventoryCartId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "reuseCartId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "emptyCartId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "couponCartId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "couponReuseCartId",
       "value": "",
       "type": "string"
     }
@@ -57,7 +87,7 @@
             "health"
           ]
         },
-        "description": "Liveness plus database connectivity. `db.status` should be UP."
+        "description": "Liveness plus database connectivity."
       },
       "response": [],
       "event": [
@@ -88,7 +118,7 @@
             "products"
           ]
         },
-        "description": "Seeded catalogue. Prices are integer minor units (cents)."
+        "description": "Seeded catalogue; prices are integer minor units (cents). Also chooses the best-stocked product for the rest of the run, because checkout genuinely consumes inventory."
       },
       "response": [],
       "event": [
@@ -98,7 +128,17 @@
             "type": "text/javascript",
             "exec": [
               "pm.test('200 OK', () => pm.response.to.have.status(200));",
-              "pm.test('catalogue seeded', () => pm.expect(pm.response.json().length).to.be.above(0));"
+              "const products = pm.response.json();",
+              "pm.test('catalogue seeded', () => pm.expect(products.length).to.be.above(0));",
+              "",
+              "// This collection really buys things, so it consumes stock. Pick the best-stocked",
+              "// product rather than assuming one, so repeated runs cannot sell it out from under us.",
+              "const stocked = products.filter(p => p.inventory >= 10).sort((a, b) => b.inventory - a.inventory);",
+              "pm.test('a product has enough stock for this run', () => pm.expect(stocked.length).to.be.above(0));",
+              "if (stocked.length) {",
+              "  pm.collectionVariables.set('productId', stocked[0].id);",
+              "  pm.collectionVariables.set('secondProductId', (stocked[1] || stocked[0]).id);",
+              "}"
             ]
           }
         }
@@ -119,7 +159,7 @@
             "carts"
           ]
         },
-        "description": "Creates an empty cart in status OPEN. Returns 201 with a Location header."
+        "description": "Creates an empty OPEN cart and stores its id in `cartId` for the requests that follow."
       },
       "response": [],
       "event": [
@@ -132,8 +172,8 @@
               "pm.test('Location header set', () => pm.expect(pm.response.headers.get('Location')).to.include('/api/carts/'));",
               "const body = pm.response.json();",
               "pm.test('starts OPEN', () => pm.expect(body.status).to.eql('OPEN'));",
-              "pm.collectionVariables.set('cartId', body.id);",
-              "console.log('cartId =', body.id);"
+              "pm.test('starts empty', () => pm.expect(body.items).to.be.an('array').that.is.empty);",
+              "pm.collectionVariables.set('cartId', body.id);"
             ]
           }
         }
@@ -155,7 +195,7 @@
             "{{cartId}}"
           ]
         },
-        "description": "Retrieves the cart created above. Run `Create cart` first."
+        "description": "The cart as the customer sees it."
       },
       "response": [],
       "event": [
@@ -193,7 +233,7 @@
             "items"
           ]
         },
-        "description": "Adds a product to the cart. Run `Create cart` first. Sending the same productId again increases the quantity instead of creating a second row.",
+        "description": "Adds a product. Adding does not reserve stock \u2014 availability is settled at checkout.",
         "body": {
           "mode": "raw",
           "raw": "{\n  \"productId\": {{productId}},\n  \"quantity\": 2\n}",
@@ -214,7 +254,6 @@
               "pm.test('200 OK', () => pm.response.to.have.status(200));",
               "const cart = pm.response.json();",
               "pm.test('cart stays OPEN', () => pm.expect(cart.status).to.eql('OPEN'));",
-              "pm.test('item present', () => pm.expect(cart.items.length).to.be.above(0));",
               "pm.test('subtotal matches line totals', () =>",
               "  pm.expect(cart.subtotalCents).to.eql(cart.items.reduce((s, i) => s + i.lineTotalCents, 0)));"
             ]
@@ -244,7 +283,7 @@
             "items"
           ]
         },
-        "description": "Run immediately after `Add item to cart` with the same productId. Expect one row with the summed quantity, not two rows.",
+        "description": "The same product again increments the existing line instead of creating a second row.",
         "body": {
           "mode": "raw",
           "raw": "{\n  \"productId\": {{productId}},\n  \"quantity\": 3\n}",
@@ -263,10 +302,58 @@
             "type": "text/javascript",
             "exec": [
               "pm.test('200 OK', () => pm.response.to.have.status(200));",
-              "const cart = pm.response.json();",
-              "const lines = cart.items.filter(i => i.productId === Number(pm.collectionVariables.get('productId')));",
+              "const lines = pm.response.json().items.filter(i => i.productId === Number(pm.collectionVariables.get('productId')));",
               "pm.test('still a single row for the product', () => pm.expect(lines.length).to.eql(1));",
               "pm.test('quantity accumulated to 5', () => pm.expect(lines[0].quantity).to.eql(5));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Update item quantity",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts/{{cartId}}/items/{{productId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts",
+            "{{cartId}}",
+            "items",
+            "{{productId}}"
+          ]
+        },
+        "description": "Replaces the quantity outright \u2014 4 means 4, not 5+4.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"quantity\": 4\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "const line = pm.response.json().items.find(i => i.productId === Number(pm.collectionVariables.get('productId')));",
+              "pm.test('quantity replaced, not added', () => pm.expect(line.quantity).to.eql(4));"
             ]
           }
         }
@@ -312,9 +399,56 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
-              "pm.test('names the offending field', () =>",
-              "  pm.expect(pm.response.json().detail).to.include('quantity'));"
+              "pm.test('400', () => pm.response.to.have.status(400));",
+              "pm.test('code is VALIDATION_FAILED', () => pm.expect(pm.response.json().code).to.eql('VALIDATION_FAILED'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Add item \u2014 quantity above limit (400)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts/{{cartId}}/items",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts",
+            "{{cartId}}",
+            "items"
+          ]
+        },
+        "description": "A cart line is capped at 1000 units, which keeps quantity arithmetic away from integer overflow.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"productId\": {{productId}},\n  \"quantity\": 2147483647\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('400', () => pm.response.to.have.status(400));",
+              "pm.test('code is VALIDATION_FAILED', () => pm.expect(pm.response.json().code).to.eql('VALIDATION_FAILED'));",
+              "pm.test('names the limit', () => pm.expect(pm.response.json().detail).to.include('1000'));"
             ]
           }
         }
@@ -360,8 +494,8 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('404 Not Found', () => pm.response.to.have.status(404));",
-              "pm.test('problem document', () => pm.expect(pm.response.json().title).to.eql('Product not found'));"
+              "pm.test('404', () => pm.response.to.have.status(404));",
+              "pm.test('code is PRODUCT_NOT_FOUND', () => pm.expect(pm.response.json().code).to.eql('PRODUCT_NOT_FOUND'));"
             ]
           }
         }
@@ -407,59 +541,8 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('404 Not Found', () => pm.response.to.have.status(404));",
-              "pm.test('problem document', () => pm.expect(pm.response.json().title).to.eql('Cart not found'));"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "Update item quantity",
-      "request": {
-        "method": "PATCH",
-        "header": [
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          }
-        ],
-        "url": {
-          "raw": "{{baseUrl}}/api/carts/{{cartId}}/items/{{productId}}",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "api",
-            "carts",
-            "{{cartId}}",
-            "items",
-            "{{productId}}"
-          ]
-        },
-        "description": "Replaces the quantity outright. After the two add requests above the quantity is 5; this sets it to 4, it does not add 4.",
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"quantity\": 4\n}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        }
-      },
-      "response": [],
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('200 OK', () => pm.response.to.have.status(200));",
-              "const cart = pm.response.json();",
-              "const line = cart.items.find(i => i.productId === Number(pm.collectionVariables.get('productId')));",
-              "pm.test('quantity replaced, not added', () => pm.expect(line.quantity).to.eql(4));",
-              "pm.test('cart stays OPEN', () => pm.expect(cart.status).to.eql('OPEN'));"
+              "pm.test('404', () => pm.response.to.have.status(404));",
+              "pm.test('code is CART_NOT_FOUND', () => pm.expect(pm.response.json().code).to.eql('CART_NOT_FOUND'));"
             ]
           }
         }
@@ -488,7 +571,7 @@
             "{{productId}}"
           ]
         },
-        "description": "Non-positive quantities are rejected before any write; the existing quantity is untouched.",
+        "description": "Rejected before any write; the stored quantity is untouched.",
         "body": {
           "mode": "raw",
           "raw": "{\n  \"quantity\": 0\n}",
@@ -506,8 +589,8 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
-              "pm.test('names the field', () => pm.expect(pm.response.json().detail).to.include('quantity'));"
+              "pm.test('400', () => pm.response.to.have.status(400));",
+              "pm.test('code is VALIDATION_FAILED', () => pm.expect(pm.response.json().code).to.eql('VALIDATION_FAILED'));"
             ]
           }
         }
@@ -524,7 +607,7 @@
           }
         ],
         "url": {
-          "raw": "{{baseUrl}}/api/carts/{{cartId}}/items/3",
+          "raw": "{{baseUrl}}/api/carts/{{cartId}}/items/999999",
           "host": [
             "{{baseUrl}}"
           ],
@@ -533,10 +616,10 @@
             "carts",
             "{{cartId}}",
             "items",
-            "3"
+            "999999"
           ]
         },
-        "description": "Product 3 was never added to this cart. Update never creates a row.",
+        "description": "This product is not in the cart. Note the code is CART_ITEM_NOT_FOUND, not PRODUCT_NOT_FOUND: update and remove never consult the catalogue, because both cases mean \"there is nothing here to change\".",
         "body": {
           "mode": "raw",
           "raw": "{\n  \"quantity\": 2\n}",
@@ -554,8 +637,55 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('404 Not Found', () => pm.response.to.have.status(404));",
-              "pm.test('problem document', () => pm.expect(pm.response.json().title).to.eql('Cart item not found'));"
+              "pm.test('404', () => pm.response.to.have.status(404));",
+              "pm.test('code is CART_ITEM_NOT_FOUND', () => pm.expect(pm.response.json().code).to.eql('CART_ITEM_NOT_FOUND'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Add a second product",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts/{{cartId}}/items",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts",
+            "{{cartId}}",
+            "items"
+          ]
+        },
+        "description": "A second line, so the removal below does not empty the cart that checkout needs.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"productId\": {{secondProductId}},\n  \"quantity\": 1\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "pm.test('two lines now', () => pm.expect(pm.response.json().items.length).to.eql(2));"
             ]
           }
         }
@@ -567,7 +697,7 @@
         "method": "DELETE",
         "header": [],
         "url": {
-          "raw": "{{baseUrl}}/api/carts/{{cartId}}/items/{{productId}}",
+          "raw": "{{baseUrl}}/api/carts/{{cartId}}/items/{{secondProductId}}",
           "host": [
             "{{baseUrl}}"
           ],
@@ -576,10 +706,10 @@
             "carts",
             "{{cartId}}",
             "items",
-            "{{productId}}"
+            "{{secondProductId}}"
           ]
         },
-        "description": "Removes the product from the cart and returns the updated cart with recalculated totals."
+        "description": "Removes the second product and returns the cart with recalculated totals."
       },
       "response": [],
       "event": [
@@ -589,10 +719,9 @@
             "type": "text/javascript",
             "exec": [
               "pm.test('200 OK', () => pm.response.to.have.status(200));",
-              "const cart = pm.response.json();",
-              "pm.test('product gone', () => pm.expect(",
-              "  cart.items.some(i => i.productId === Number(pm.collectionVariables.get('productId')))).to.be.false);",
-              "pm.test('cart stays OPEN', () => pm.expect(cart.status).to.eql('OPEN'));"
+              "const gone = Number(pm.collectionVariables.get('secondProductId'));",
+              "pm.test('second product gone', () => pm.expect(pm.response.json().items.some(i => i.productId === gone)).to.be.false);",
+              "pm.test('original product still there', () => pm.expect(pm.response.json().items.length).to.eql(1));"
             ]
           }
         }
@@ -604,7 +733,7 @@
         "method": "DELETE",
         "header": [],
         "url": {
-          "raw": "{{baseUrl}}/api/carts/{{cartId}}/items/{{productId}}",
+          "raw": "{{baseUrl}}/api/carts/{{cartId}}/items/{{secondProductId}}",
           "host": [
             "{{baseUrl}}"
           ],
@@ -613,10 +742,10 @@
             "carts",
             "{{cartId}}",
             "items",
-            "{{productId}}"
+            "{{secondProductId}}"
           ]
         },
-        "description": "Run straight after `Remove item`. Removal is not idempotent: the second call is a 404."
+        "description": "Removal is not idempotent: the second call reports that there was nothing to remove."
       },
       "response": [],
       "event": [
@@ -625,8 +754,258 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('404 Not Found', () => pm.response.to.have.status(404));",
-              "pm.test('problem document', () => pm.expect(pm.response.json().title).to.eql('Cart item not found'));"
+              "pm.test('404', () => pm.response.to.have.status(404));",
+              "pm.test('code is CART_ITEM_NOT_FOUND', () => pm.expect(pm.response.json().code).to.eql('CART_ITEM_NOT_FOUND'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Setup: create cart (limitCartId)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts"
+          ]
+        },
+        "description": "Creates a dedicated cart so this scenario does not depend on any other. Saved as `limitCartId`."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 Created', () => pm.response.to.have.status(201));",
+              "pm.collectionVariables.set('limitCartId', pm.response.json().id);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Add 1000 units (at the limit)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts/{{limitCartId}}/items",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts",
+            "{{limitCartId}}",
+            "items"
+          ]
+        },
+        "description": "Exactly at the per-line cap, so this is accepted.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"productId\": {{productId}},\n  \"quantity\": 1000\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "pm.test('quantity is 1000', () => pm.expect(pm.response.json().items[0].quantity).to.eql(1000));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Add 1 more \u2014 accumulated limit (409)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts/{{limitCartId}}/items",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts",
+            "{{limitCartId}}",
+            "items"
+          ]
+        },
+        "description": "Two individually valid requests whose sum exceeds the cap. Checked before the increment, so the quantity cannot overflow.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"productId\": {{productId}},\n  \"quantity\": 1\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('409', () => pm.response.to.have.status(409));",
+              "pm.test('code is CART_ITEM_QUANTITY_LIMIT', () => pm.expect(pm.response.json().code).to.eql('CART_ITEM_QUANTITY_LIMIT'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Setup: create cart (inventoryCartId)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts"
+          ]
+        },
+        "description": "Creates a dedicated cart so this scenario does not depend on any other. Saved as `inventoryCartId`."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 Created', () => pm.response.to.have.status(201));",
+              "pm.collectionVariables.set('inventoryCartId', pm.response.json().id);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Setup: add item (inventoryCartId)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts/{{inventoryCartId}}/items",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts",
+            "{{inventoryCartId}}",
+            "items"
+          ]
+        },
+        "description": "A cart may hold more units than exist \u2014 that is only refused at checkout.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"productId\": {{productId}},\n  \"quantity\": 1000\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Checkout \u2014 insufficient inventory (409)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Idempotency-Key",
+            "value": "{{idempotencyKey}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts/{{inventoryCartId}}/checkout",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts",
+            "{{inventoryCartId}}",
+            "checkout"
+          ]
+        },
+        "description": "Stock is checked and decremented in one conditional UPDATE, so overselling is impossible. The cart survives."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.collectionVariables.set('idempotencyKey', 'pm-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8));"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('409', () => pm.response.to.have.status(409));",
+              "pm.test('code is INSUFFICIENT_INVENTORY', () => pm.expect(pm.response.json().code).to.eql('INSUFFICIENT_INVENTORY'));",
+              "pm.test('says how much stock there is', () => pm.expect(pm.response.json().detail).to.include('in stock'));"
             ]
           }
         }
@@ -654,10 +1033,19 @@
             "checkout"
           ]
         },
-        "description": "Requires an `Idempotency-Key` header. Turns the OPEN cart into an order in one transaction: stock is taken, prices are snapshotted onto the order lines, and the cart becomes CHECKED_OUT. A fresh key is generated by the pre-request script and stored in `idempotencyKey` so the replay request can reuse it.\n\nThe body is optional. Send `{\"couponCode\": \"...\"}` to redeem a coupon as part of the same transaction."
+        "description": "Turns the OPEN cart into an order in one transaction: stock is taken, prices are snapshotted onto the order lines, and the cart becomes CHECKED_OUT."
       },
       "response": [],
       "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.collectionVariables.set('idempotencyKey', 'pm-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8));"
+            ]
+          }
+        },
         {
           "listen": "test",
           "script": {
@@ -672,206 +1060,40 @@
               "  pm.expect(order.netTotalCents).to.eql(order.grossTotalCents - order.discountTotalCents));"
             ]
           }
-        },
-        {
-          "listen": "prerequest",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "// A fresh key per real checkout; the replay request reuses this exact value.",
-              "pm.collectionVariables.set('idempotencyKey', 'checkout-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8));"
-            ]
-          }
         }
       ]
     },
     {
-      "name": "Checkout with coupon",
+      "name": "Get order",
       "request": {
-        "method": "POST",
-        "header": [
-          {
-            "key": "Idempotency-Key",
-            "value": "{{idempotencyKey}}"
-          },
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          }
-        ],
+        "method": "GET",
+        "header": [],
         "url": {
-          "raw": "{{baseUrl}}/api/carts/{{cartId}}/checkout",
+          "raw": "{{baseUrl}}/api/orders/{{orderId}}",
           "host": [
             "{{baseUrl}}"
           ],
           "path": [
             "api",
-            "carts",
-            "{{cartId}}",
-            "checkout"
+            "orders",
+            "{{orderId}}"
           ]
         },
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"couponCode\": \"{{couponCode}}\"\n}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        },
-        "description": "Redeems the coupon inside the checkout transaction. Set `couponCode` from a generated coupon first. The order records gross, discount and net, plus a copy of the coupon code and percentage so it still explains itself later."
+        "description": "The order and its snapshot lines: names and prices as captured at checkout, not current catalogue values."
       },
       "response": [],
       "event": [
-        {
-          "listen": "prerequest",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.collectionVariables.set('idempotencyKey', 'checkout-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8));"
-            ]
-          }
-        },
         {
           "listen": "test",
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('201 Created', () => pm.response.to.have.status(201));",
-              "const order = pm.response.json();",
-              "pm.collectionVariables.set('orderId', order.id);",
-              "pm.test('discount applied', () => pm.expect(order.discountTotalCents).to.be.above(0));",
-              "pm.test('net = gross - discount', () =>",
-              "  pm.expect(order.netTotalCents).to.eql(order.grossTotalCents - order.discountTotalCents));",
-              "pm.test('net is never negative', () => pm.expect(order.netTotalCents).to.be.at.least(0));",
-              "pm.test('coupon snapshotted onto the order', () =>",
-              "  pm.expect(order.couponCode).to.eql(pm.collectionVariables.get('couponCode')));",
-              "pm.test('discount matches the percentage, rounded half up', () =>",
-              "  pm.expect(order.discountTotalCents).to.eql(",
-              "    Math.floor((order.grossTotalCents * order.couponDiscountPercent + 50) / 100)));"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "Checkout \u2014 coupon already redeemed (409)",
-      "request": {
-        "method": "POST",
-        "header": [
-          {
-            "key": "Idempotency-Key",
-            "value": "{{idempotencyKey}}"
-          },
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          }
-        ],
-        "url": {
-          "raw": "{{baseUrl}}/api/carts/{{cartId}}/checkout",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "api",
-            "carts",
-            "{{cartId}}",
-            "checkout"
-          ]
-        },
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"couponCode\": \"{{couponCode}}\"\n}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        },
-        "description": "Run after `Checkout with coupon`, on a new cart. A coupon is redeemable exactly once."
-      },
-      "response": [],
-      "event": [
-        {
-          "listen": "prerequest",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.collectionVariables.set('idempotencyKey', 'checkout-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8));"
-            ]
-          }
-        },
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
-              "pm.test('code is COUPON_ALREADY_REDEEMED', () =>",
-              "  pm.expect(pm.response.json().code).to.eql('COUPON_ALREADY_REDEEMED'));"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "Checkout \u2014 unknown coupon (404)",
-      "request": {
-        "method": "POST",
-        "header": [
-          {
-            "key": "Idempotency-Key",
-            "value": "{{idempotencyKey}}"
-          },
-          {
-            "key": "Content-Type",
-            "value": "application/json"
-          }
-        ],
-        "url": {
-          "raw": "{{baseUrl}}/api/carts/{{cartId}}/checkout",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "api",
-            "carts",
-            "{{cartId}}",
-            "checkout"
-          ]
-        },
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"couponCode\": \"NO-SUCH-COUPON\"\n}",
-          "options": {
-            "raw": {
-              "language": "json"
-            }
-          }
-        },
-        "description": "An unknown code is rejected before anything is written; the cart stays OPEN."
-      },
-      "response": [],
-      "event": [
-        {
-          "listen": "prerequest",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.collectionVariables.set('idempotencyKey', 'checkout-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8));"
-            ]
-          }
-        },
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('404 Not Found', () => pm.response.to.have.status(404));",
-              "pm.test('code is COUPON_NOT_FOUND', () =>",
-              "  pm.expect(pm.response.json().code).to.eql('COUPON_NOT_FOUND'));"
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "pm.test('lines carry snapshots', () => {",
+              "  const line = pm.response.json().items[0];",
+              "  pm.expect(line).to.have.property('name');",
+              "  pm.expect(line.lineTotalCents).to.eql(line.unitPriceCents * line.quantity);",
+              "});"
             ]
           }
         }
@@ -899,7 +1121,7 @@
             "checkout"
           ]
         },
-        "description": "Run straight after `Checkout cart` with the same key \u2014 this is what a client that timed out would send. Returns the original order, creates nothing, and does not touch inventory."
+        "description": "What a client that timed out would send. Returns the original order, creates nothing, touches no inventory."
       },
       "response": [],
       "event": [
@@ -918,49 +1140,13 @@
       ]
     },
     {
-      "name": "Get order",
-      "request": {
-        "method": "GET",
-        "header": [],
-        "url": {
-          "raw": "{{baseUrl}}/api/orders/{{orderId}}",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "api",
-            "orders",
-            "{{orderId}}"
-          ]
-        },
-        "description": "The order and its snapshot lines. Names and prices are the ones captured at checkout, not the current catalogue values."
-      },
-      "response": [],
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('200 OK', () => pm.response.to.have.status(200));",
-              "pm.test('lines carry snapshots', () => {",
-              "  const line = pm.response.json().items[0];",
-              "  pm.expect(line).to.have.property('name');",
-              "  pm.expect(line.lineTotalCents).to.eql(line.unitPriceCents * line.quantity);",
-              "});"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "Checkout again \u2014 already checked out (409)",
+      "name": "Checkout again \u2014 different key (409)",
       "request": {
         "method": "POST",
         "header": [
           {
             "key": "Idempotency-Key",
-            "value": "different-key-{{$guid}}"
+            "value": "different-{{$guid}}"
           }
         ],
         "url": {
@@ -975,7 +1161,7 @@
             "checkout"
           ]
         },
-        "description": "Run after `Checkout cart`, with a DIFFERENT key. A new key means a new request, not a retry, so the cart's state refuses it \u2014 this is CART_NOT_OPEN, not a replay."
+        "description": "A new key means a new request, not a retry, so the cart's state refuses it."
       },
       "response": [],
       "event": [
@@ -984,7 +1170,7 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
+              "pm.test('409', () => pm.response.to.have.status(409));",
               "pm.test('code is CART_NOT_OPEN', () => pm.expect(pm.response.json().code).to.eql('CART_NOT_OPEN'));"
             ]
           }
@@ -992,12 +1178,17 @@
       ]
     },
     {
-      "name": "Checkout \u2014 no Idempotency-Key (400)",
+      "name": "Add item \u2014 checked-out cart (409)",
       "request": {
         "method": "POST",
-        "header": [],
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
         "url": {
-          "raw": "{{baseUrl}}/api/carts/{{cartId}}/checkout",
+          "raw": "{{baseUrl}}/api/carts/{{cartId}}/items",
           "host": [
             "{{baseUrl}}"
           ],
@@ -1005,10 +1196,19 @@
             "api",
             "carts",
             "{{cartId}}",
-            "checkout"
+            "items"
           ]
         },
-        "description": "The header is mandatory. A blank value is rejected the same way."
+        "description": "A cart that has produced an order is frozen: its contents are the record of what was ordered.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"productId\": 3,\n  \"quantity\": 1\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
       },
       "response": [],
       "event": [
@@ -1017,9 +1217,171 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('400 Bad Request', () => pm.response.to.have.status(400));",
-              "pm.test('code is IDEMPOTENCY_KEY_REQUIRED', () =>",
-              "  pm.expect(pm.response.json().code).to.eql('IDEMPOTENCY_KEY_REQUIRED'));"
+              "pm.test('409', () => pm.response.to.have.status(409));",
+              "pm.test('code is CART_NOT_OPEN', () => pm.expect(pm.response.json().code).to.eql('CART_NOT_OPEN'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Update item \u2014 checked-out cart (409)",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts/{{cartId}}/items/{{productId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts",
+            "{{cartId}}",
+            "items",
+            "{{productId}}"
+          ]
+        },
+        "description": "Same guard on update.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"quantity\": 9\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('409', () => pm.response.to.have.status(409));",
+              "pm.test('code is CART_NOT_OPEN', () => pm.expect(pm.response.json().code).to.eql('CART_NOT_OPEN'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Remove item \u2014 checked-out cart (409)",
+      "request": {
+        "method": "DELETE",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts/{{cartId}}/items/{{productId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts",
+            "{{cartId}}",
+            "items",
+            "{{productId}}"
+          ]
+        },
+        "description": "Same guard on removal. The cart's contents are unchanged throughout."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('409', () => pm.response.to.have.status(409));",
+              "pm.test('code is CART_NOT_OPEN', () => pm.expect(pm.response.json().code).to.eql('CART_NOT_OPEN'));",
+              "pm.test('contents unchanged', () => pm.sendRequest({",
+              "  url: pm.collectionVariables.get('baseUrl') + '/api/carts/' + pm.collectionVariables.get('cartId'),",
+              "  method: 'GET'",
+              "}, (e, r) => { if (!e) pm.expect(r.json().items.length).to.eql(1); }));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Setup: create cart (reuseCartId)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts"
+          ]
+        },
+        "description": "Creates a dedicated cart so this scenario does not depend on any other. Saved as `reuseCartId`."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 Created', () => pm.response.to.have.status(201));",
+              "pm.collectionVariables.set('reuseCartId', pm.response.json().id);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Setup: add item (reuseCartId)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts/{{reuseCartId}}/items",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts",
+            "{{reuseCartId}}",
+            "items"
+          ]
+        },
+        "description": "Puts a line in the cart so checkout has something to sell.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"productId\": {{productId}},\n  \"quantity\": 1\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));"
             ]
           }
         }
@@ -1027,6 +1389,75 @@
     },
     {
       "name": "Checkout \u2014 key reused for another cart (409)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Idempotency-Key",
+            "value": "{{idempotencyKey}}"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts/{{reuseCartId}}/checkout",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts",
+            "{{reuseCartId}}",
+            "checkout"
+          ]
+        },
+        "description": "The same key against a different cart is not a retry \u2014 it is a different request wearing the same name."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('409', () => pm.response.to.have.status(409));",
+              "pm.test('code is IDEMPOTENCY_KEY_REUSED', () => pm.expect(pm.response.json().code).to.eql('IDEMPOTENCY_KEY_REUSED'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Setup: create cart (emptyCartId)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts"
+          ]
+        },
+        "description": "Creates a dedicated cart so this scenario does not depend on any other. Saved as `emptyCartId`."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 Created', () => pm.response.to.have.status(201));",
+              "pm.collectionVariables.set('emptyCartId', pm.response.json().id);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Checkout \u2014 empty cart (409)",
       "request": {
         "method": "POST",
         "header": [
@@ -1047,33 +1478,36 @@
             "checkout"
           ]
         },
-        "description": "The same key against a different cart is not a retry \u2014 it is a different request wearing the same name \u2014 so it is refused rather than replayed. Set `emptyCartId` to any other cart id."
+        "description": "An empty cart cannot be checked out."
       },
       "response": [],
       "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.collectionVariables.set('idempotencyKey', 'pm-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8));"
+            ]
+          }
+        },
         {
           "listen": "test",
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
-              "pm.test('code is IDEMPOTENCY_KEY_REUSED', () =>",
-              "  pm.expect(pm.response.json().code).to.eql('IDEMPOTENCY_KEY_REUSED'));"
+              "pm.test('409', () => pm.response.to.have.status(409));",
+              "pm.test('code is CART_EMPTY', () => pm.expect(pm.response.json().code).to.eql('CART_EMPTY'));"
             ]
           }
         }
       ]
     },
     {
-      "name": "Checkout \u2014 empty cart (409)",
+      "name": "Checkout \u2014 no Idempotency-Key (400)",
       "request": {
         "method": "POST",
-        "header": [
-          {
-            "key": "Idempotency-Key",
-            "value": "empty-cart-{{$guid}}"
-          }
-        ],
+        "header": [],
         "url": {
           "raw": "{{baseUrl}}/api/carts/{{emptyCartId}}/checkout",
           "host": [
@@ -1086,7 +1520,7 @@
             "checkout"
           ]
         },
-        "description": "Create a fresh cart first and set `emptyCartId` to it, or run `Create cart` and copy the id. An empty cart cannot be checked out."
+        "description": "The header is mandatory. A blank value is rejected the same way."
       },
       "response": [],
       "event": [
@@ -1095,8 +1529,397 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('409 Conflict', () => pm.response.to.have.status(409));",
-              "pm.test('code is CART_EMPTY', () => pm.expect(pm.response.json().code).to.eql('CART_EMPTY'));"
+              "pm.test('400', () => pm.response.to.have.status(400));",
+              "pm.test('code is IDEMPOTENCY_KEY_REQUIRED', () => pm.expect(pm.response.json().code).to.eql('IDEMPOTENCY_KEY_REQUIRED'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin: generate reward coupon",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/admin/coupons/generate",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "admin",
+            "coupons",
+            "generate"
+          ]
+        },
+        "description": "Issues the coupon for the next unrewarded milestone, if enough successful orders have been placed. If the milestone is not yet reached this answers 409 and the coupon requests below are skipped."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const ok = pm.response.code === 201;",
+              "pm.test('201 issued, or 409 not yet earned', () => pm.expect([201, 409]).to.include(pm.response.code));",
+              "if (ok) {",
+              "  const coupon = pm.response.json();",
+              "  pm.collectionVariables.set('couponCode', coupon.code);",
+              "  pm.test('coupon is AVAILABLE', () => pm.expect(coupon.status).to.eql('AVAILABLE'));",
+              "} else {",
+              "  pm.test('milestone not reached yet', () => pm.expect(pm.response.json().code).to.eql('MILESTONE_NOT_REACHED'));",
+              "  // Skip the coupon requests. Feature-detected so it works on old and new Postman.",
+              "  const skipTo = 'Get order \u2014 unknown id (404)';",
+              "  if (pm.execution && pm.execution.setNextRequest) pm.execution.setNextRequest(skipTo);",
+              "  else postman.setNextRequest(skipTo);",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Setup: create cart (couponCartId)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts"
+          ]
+        },
+        "description": "Creates a dedicated cart so this scenario does not depend on any other. Saved as `couponCartId`."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 Created', () => pm.response.to.have.status(201));",
+              "pm.collectionVariables.set('couponCartId', pm.response.json().id);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Setup: add item (couponCartId)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts/{{couponCartId}}/items",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts",
+            "{{couponCartId}}",
+            "items"
+          ]
+        },
+        "description": "Puts a line in the cart so checkout has something to sell.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"productId\": {{productId}},\n  \"quantity\": 2\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Checkout with coupon",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Idempotency-Key",
+            "value": "{{idempotencyKey}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts/{{couponCartId}}/checkout",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts",
+            "{{couponCartId}}",
+            "checkout"
+          ]
+        },
+        "description": "Redeems the coupon inside the checkout transaction. The order records gross, discount and net, plus a copy of the coupon code and percentage.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"couponCode\": \"{{couponCode}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.collectionVariables.set('idempotencyKey', 'pm-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8));"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 Created', () => pm.response.to.have.status(201));",
+              "const order = pm.response.json();",
+              "pm.test('discount applied', () => pm.expect(order.discountTotalCents).to.be.above(0));",
+              "pm.test('net = gross - discount', () =>",
+              "  pm.expect(order.netTotalCents).to.eql(order.grossTotalCents - order.discountTotalCents));",
+              "pm.test('net is never negative', () => pm.expect(order.netTotalCents).to.be.at.least(0));",
+              "pm.test('discount matches the percentage, rounded half up', () =>",
+              "  pm.expect(order.discountTotalCents).to.eql(",
+              "    Math.floor((order.grossTotalCents * order.couponDiscountPercent + 50) / 100)));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Setup: create cart (couponReuseCartId)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts"
+          ]
+        },
+        "description": "Creates a dedicated cart so this scenario does not depend on any other. Saved as `couponReuseCartId`."
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('201 Created', () => pm.response.to.have.status(201));",
+              "pm.collectionVariables.set('couponReuseCartId', pm.response.json().id);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Setup: add item (couponReuseCartId)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts/{{couponReuseCartId}}/items",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts",
+            "{{couponReuseCartId}}",
+            "items"
+          ]
+        },
+        "description": "Puts a line in the cart so checkout has something to sell.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"productId\": {{productId}},\n  \"quantity\": 1\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Checkout \u2014 coupon already redeemed (409)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Idempotency-Key",
+            "value": "{{idempotencyKey}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts/{{couponReuseCartId}}/checkout",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts",
+            "{{couponReuseCartId}}",
+            "checkout"
+          ]
+        },
+        "description": "A coupon is redeemable exactly once.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"couponCode\": \"{{couponCode}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.collectionVariables.set('idempotencyKey', 'pm-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8));"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('409', () => pm.response.to.have.status(409));",
+              "pm.test('code is COUPON_ALREADY_REDEEMED', () => pm.expect(pm.response.json().code).to.eql('COUPON_ALREADY_REDEEMED'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Checkout \u2014 unknown coupon (404)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Idempotency-Key",
+            "value": "{{idempotencyKey}}"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/carts/{{couponReuseCartId}}/checkout",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "carts",
+            "{{couponReuseCartId}}",
+            "checkout"
+          ]
+        },
+        "description": "An unknown code is rejected before anything is written; the cart stays OPEN.",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"couponCode\": \"NO-SUCH-COUPON\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": [],
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.collectionVariables.set('idempotencyKey', 'pm-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8));"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('404', () => pm.response.to.have.status(404));",
+              "pm.test('code is COUPON_NOT_FOUND', () => pm.expect(pm.response.json().code).to.eql('COUPON_NOT_FOUND'));",
+              "pm.test('cart survives', () => pm.sendRequest({",
+              "  url: pm.collectionVariables.get('baseUrl') + '/api/carts/' + pm.collectionVariables.get('couponReuseCartId'),",
+              "  method: 'GET'",
+              "}, (e, r) => { if (!e) pm.expect(r.json().status).to.eql('OPEN'); }));"
             ]
           }
         }
@@ -1127,7 +1950,7 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('404 Not Found', () => pm.response.to.have.status(404));",
+              "pm.test('404', () => pm.response.to.have.status(404));",
               "pm.test('code is ORDER_NOT_FOUND', () => pm.expect(pm.response.json().code).to.eql('ORDER_NOT_FOUND'));"
             ]
           }
@@ -1150,7 +1973,7 @@
             "00000000-0000-0000-0000-000000000000"
           ]
         },
-        "description": "Well-formed UUID that does not exist. Expect an RFC 7807 problem document."
+        "description": "A well-formed cart id that does not exist."
       },
       "response": [],
       "event": [
@@ -1159,8 +1982,8 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('404 Not Found', () => pm.response.to.have.status(404));",
-              "pm.test('problem document', () => pm.expect(pm.response.json().title).to.eql('Cart not found'));"
+              "pm.test('404', () => pm.response.to.have.status(404));",
+              "pm.test('code is CART_NOT_FOUND', () => pm.expect(pm.response.json().code).to.eql('CART_NOT_FOUND'));"
             ]
           }
         }
@@ -1182,7 +2005,7 @@
             "not-a-uuid"
           ]
         },
-        "description": "Spring rejects the path variable before the controller runs."
+        "description": "Spring rejects the path variable before the controller runs, so this one has no `code` field."
       },
       "response": [],
       "event": [
@@ -1191,51 +2014,7 @@
           "script": {
             "type": "text/javascript",
             "exec": [
-              "pm.test('400 Bad Request', () => pm.response.to.have.status(400));"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "Admin: generate reward coupon",
-      "request": {
-        "method": "POST",
-        "header": [],
-        "url": {
-          "raw": "{{baseUrl}}/api/admin/coupons/generate",
-          "host": [
-            "{{baseUrl}}"
-          ],
-          "path": [
-            "api",
-            "admin",
-            "coupons",
-            "generate"
-          ]
-        },
-        "description": "Administrative. Generates the coupon for the next unrewarded milestone, if enough successful orders have been placed to earn it. One coupon per call; call again to catch up on further milestones.\n\n201 with the coupon when a milestone is due; 409 MILESTONE_NOT_REACHED otherwise \u2014 which is also the answer to a repeat call, since the milestone just rewarded is no longer the next one."
-      },
-      "response": [],
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "type": "text/javascript",
-            "exec": [
-              "pm.test('201 when a milestone is due, 409 when not', () =>",
-              "  pm.expect(pm.response.code).to.be.oneOf([201, 409]));",
-              "if (pm.response.code === 201) {",
-              "  const coupon = pm.response.json();",
-              "  pm.collectionVariables.set('couponCode', coupon.code);",
-              "  pm.test('coupon starts AVAILABLE', () => pm.expect(coupon.status).to.eql('AVAILABLE'));",
-              "  pm.test('milestone is positive', () => pm.expect(coupon.milestone).to.be.above(0));",
-              "  pm.test('carries a discount percentage', () =>",
-              "    pm.expect(coupon.discountPercent).to.be.within(1, 100));",
-              "} else {",
-              "  pm.test('code is MILESTONE_NOT_REACHED', () =>",
-              "    pm.expect(pm.response.json().code).to.eql('MILESTONE_NOT_REACHED'));",
-              "}"
+              "pm.test('400', () => pm.response.to.have.status(400));"
             ]
           }
         }
@@ -1257,7 +2036,7 @@
             "report"
           ]
         },
-        "description": "Administrative, read-only. Aggregates over order snapshots, so repricing or renaming a product never changes reported history. Safe to call repeatedly; it writes nothing."
+        "description": "Administrative, read-only. Aggregates over order snapshots, so repricing or renaming a product never changes reported history."
       },
       "response": [],
       "event": [
