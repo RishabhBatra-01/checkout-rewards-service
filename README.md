@@ -58,7 +58,7 @@ com.uniblox.store
 |---|---|
 | **Java 21** | required to build and run |
 | **A Docker-compatible runtime** | required for the tests only (Testcontainers) |
-| **A PostgreSQL database** | Supabase, or any PostgreSQL. Verified against PostgreSQL 17 (Supabase) and `postgres:17-alpine` in tests |
+| **A PostgreSQL database** | `docker compose up -d` provides one; any PostgreSQL works. Verified against PostgreSQL 17 |
 
 Maven is not required — the repository includes the Maven wrapper (`./mvnw`).
 
@@ -70,22 +70,25 @@ export JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home
 
 ## Configure the database
 
-All commands below run from `backend/`.
+The service needs a PostgreSQL. The quickest way is the bundled one:
 
 ```bash
-cd backend
-cp .env.example .env
+docker compose up -d          # starts PostgreSQL on localhost:5432
+cp backend/.env.example backend/.env
 ```
 
-Fill in `.env` from the Supabase dashboard under **Project → Connect → Session pooler**:
+`.env.example` already matches those container settings, so there is nothing to edit.
+The application creates its schema and seeds the catalogue on first start — no dump to
+import.
 
-```properties
-DB_URL=jdbc:postgresql://aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require
-DB_USERNAME=postgres.<project-ref>
-DB_PASSWORD=<your-database-password>
-```
+`.env` is git-ignored, and nothing in this repository contains credentials. Spring
+imports it on startup and real environment variables take precedence, so the same build
+runs unchanged in a deployed environment.
 
-Three things worth knowing:
+### Using a hosted PostgreSQL instead
+
+Any PostgreSQL works — put your own values in `.env`. Two things catch people out with
+Supabase specifically, and both are noted in `.env.example`:
 
 - **It must be a JDBC URL** (`jdbc:postgresql://…`), not the `postgresql://…` URI the
   dashboard shows, and credentials go in `DB_USERNAME` / `DB_PASSWORD` rather than in
@@ -93,11 +96,8 @@ Three things worth knowing:
 - **Use the session pooler (port 5432), not the transaction pooler (6543).** Flyway
   takes a session-level advisory lock while migrating and Hibernate uses server-side
   prepared statements; both misbehave behind a transaction pooler.
-- `.env` is git-ignored, and nothing in the repository contains credentials. Spring
-  imports it on startup, and real environment variables override it — so the same build
-  runs unchanged in a deployed environment.
 
-Any PostgreSQL works; only the URL differs. Development and tests used version 17.
+Development and tests used PostgreSQL 17.
 
 ## Run
 
@@ -198,13 +198,13 @@ different conditions share a status:
   "instance": "/api/carts/afab.../checkout", "code": "INSUFFICIENT_INVENTORY" }
 ```
 
-Branch on `code`, not on the status. The 14 codes are listed in
+Branch on `code`, not on the status. The 15 codes are listed in
 [DECISIONS.md §12](DECISIONS.md).
 
 ### Postman collection
 
 **[`docs/store-api.postman_collection.json`](docs/store-api.postman_collection.json)** —
-import via **Import → Files**. 29 requests covering every endpoint and its error cases,
+import via **Import → Files**. 47 requests covering every endpoint and its error cases,
 with assertions that check the report reconciles and that a retry replays rather than
 re-charges. `Create cart` and `Checkout` store ids into collection variables, so the
 requests chain without copy-pasting UUIDs.
@@ -306,6 +306,7 @@ Everything else deferred, and why, is in
 ```
 DECISIONS.md                        design decisions, invariants, trade-offs
 docs/                               per-phase build notes + Postman collection
+docker-compose.yml                  a local PostgreSQL for running the service
 backend/
   pom.xml, mvnw                     Maven wrapper — no global Maven needed
   .env.example                      connection template (.env is git-ignored)

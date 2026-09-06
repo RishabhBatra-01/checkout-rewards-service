@@ -1,0 +1,27 @@
+# A local PostgreSQL for running the service.
+#
+#   docker compose up -d
+#
+# The application creates its own schema and seeds the catalogue on first start,
+# so there is nothing to import. Credentials here are deliberately trivial: this
+# database is disposable and never leaves your machine.
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: store-db
+    environment:
+      POSTGRES_DB: store
+      POSTGRES_USER: store
+      POSTGRES_PASSWORD: store
+    ports:
+      - "5432:5432"
+    volumes:
+      - store-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U store -d store"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  store-db-data:
